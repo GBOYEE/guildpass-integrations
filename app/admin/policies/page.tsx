@@ -1,9 +1,9 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { useAccount } from 'wagmi'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { getApi, type AccessPolicy } from '@/lib/api'
+import { getApi, type AccessPolicy, type Resource, MembershipTier, Role } from '@/lib/api'
 import { AuthError } from '@/lib/api/live'
 import { FeatureGate } from '@/components/feature-gate'
 import { features } from '@/lib/features'
@@ -12,6 +12,7 @@ import { AdminGuard } from '@/components/admin-guard'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
 import {
   DeniedState,
   EmptyState,
@@ -28,6 +29,194 @@ import {
 type PolicyRollback = {
   previousPolicies?: AccessPolicy[]
 }
+
+const ALL_ROLES: Role[] = ['member', 'moderator', 'admin']
+const ALL_TIERS: MembershipTier[] = ['free', 'standard', 'pro']
+
+// ── ToggleRole chip ──────────────────────────────────────────────────────────
+
+function ToggleRole({
+  role,
+  selected,
+  onChange,
+  disabled,
+}: {
+  role: Role
+  selected: boolean
+  onChange: (v: boolean) => void
+  disabled: boolean
+}) {
+  return (
+    <label
+      className={`inline-flex cursor-pointer items-center gap-2 rounded-md border px-3 py-1 text-sm transition-colors ${
+        selected
+          ? 'border-primary bg-primary/10 text-primary'
+          : 'border-input hover:border-muted-foreground'
+      } ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
+    >
+      <input
+        type="checkbox"
+        className="h-3.5 w-3.5 accent-primary"
+        checked={selected}
+        disabled={disabled}
+        onChange={(e) => onChange(e.target.checked)}
+      />
+      <span>{role}</span>
+    </label>
+  )
+}
+
+// ── PolicyForm component (reusable for create + edit) ────────────────────────
+
+function PolicyForm({
+  resourceId,
+  initial,
+  onSave,
+  onCancel,
+  disabled,
+}: {
+  resourceId: string
+  initial?: AccessPolicy
+  onSave: (p: AccessPolicy) => void
+  onCancel: () => void
+  disabled: boolean
+}) {
+  const [resourceIdValue, setResourceIdValue] = useState(
+    initial?.resourceId ?? resourceId,
+  )
+  const [minTier, setMinTier] = useState<MembershipTier | undefined>(
+    initial?.minTier,
+  )
+  const [roles, setRoles] = useState<Role[]>(initial?.roles ?? [])
+  const [errors, setErrors] = useState<PolicyValidationErrors>({})
+
+  const toggleRole = (role: Role, selected: boolean) => {
+    setRoles(selected ? [...roles, role] : roles.filter((r) => r !== role))
+  }
+
+  const handleSubmit = () => {
+    const policy: AccessPolicy = {
+      resourceId: resourceIdValue.trim(),
+      minTier,
+      roles: roles.length > 0 ? roles : undefined,
+    }
+    const result = validatePolicy(policy)
+    if (!result.valid) {
+      setErrors(result.errors)
+      return
+    }
+    setErrors({})
+    onSave(result.value)
+  }
+
+  return (
+    <div className="space-y-3 rounded-md border border-muted p-4" role="form" aria-label="Policy form">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <div>
+          <label
+            htmlFor="policy-resource-id"
+            className="mb-1 block text-xs font-medium text-muted-foreground"
+          >
+            Resource ID
+          </label>
+          <Input
+            id="policy-resource-id"
+            value={resourceIdValue}
+            onChange={(e) => setResourceIdValue(e.target.value)}
+            disabled={!!initial || disabled}
+            placeholder="e.g. alpha, pro-reports"
+          />
+          {errors.resourceId && (
+            <p className="mt-1 text-xs text-destructive" role="alert">
+              {errors.resourceId}
+            </p>
+          )}
+        </div>
+        <div>
+          <label
+            htmlFor="policy-min-tier"
+            className="mb-1 block text-xs font-medium text-muted-foreground"
+          >
+            Minimum Tier
+          </label>
+          <select
+            id="policy-min-tier"
+            className="flex h-9 w-full rounded-md border border-input bg-transparent px-2 text-sm"
+            value={minTier ?? ''}
+            onChange={(e) =>
+              setMinTier(
+                (e.target.value || undefined) as MembershipTier | undefined,
+              )
+            }
+            disabled={disabled}
+          >
+            <option value="">— none —</option>
+            {ALL_TIERS.map((t) => (
+              <option key={t} value={t}>
+                {t}
+              </option>
+            ))}
+          </select>
+          {errors.minTier && (
+            <p className="mt-1 text-xs text-destructive" role="alert">
+              {errors.minTier}
+            </p>
+          )}
+        </div>
+      </div>
+
+      <div>
+        <label className="mb-1.5 block text-xs font-medium text-muted-foreground">
+          Required Roles
+        </label>
+        <div className="flex flex-wrap gap-2">
+          {ALL_ROLES.map((role) => (
+            <ToggleRole
+              key={role}
+              role={role}
+              selected={roles.includes(role)}
+              onChange={(v) => toggleRole(role, v)}
+              disabled={disabled}
+            />
+          ))}
+        </div>
+        {errors.roles && (
+          <p className="mt-1 text-xs text-destructive" role="alert">
+            {errors.roles}
+          </p>
+        )}
+      </div>
+
+      {errors.combination && (
+        <p className="text-xs text-destructive" role="alert">
+          {errors.combination}
+        </p>
+      )}
+
+      <div className="flex gap-2 pt-1">
+        <Button
+          type="button"
+          size="sm"
+          onClick={handleSubmit}
+          disabled={disabled}
+        >
+          {initial ? 'Update' : 'Create'} Policy
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          onClick={onCancel}
+          disabled={disabled}
+        >
+          Cancel
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+// ── Session expired banner ───────────────────────────────────────────────────
 
 function SessionExpiredBanner() {
   const { signIn, isSigningIn } = useSiweAuth()
@@ -55,6 +244,8 @@ function SessionExpiredBanner() {
   )
 }
 
+// ── Main page ────────────────────────────────────────────────────────────────
+
 export default function PoliciesPage() {
   const { address } = useAccount()
   const { authSession, markExpired } = useSiweAuth()
@@ -67,6 +258,10 @@ export default function PoliciesPage() {
   const [formErrors, setFormErrors] = useState<
     Record<string, PolicyValidationErrors>
   >({})
+  const [showCreateForm, setShowCreateForm] = useState(false)
+  const [editingResourceId, setEditingResourceId] = useState<string | null>(null)
+
+  // ── Policies query ───────────────────────────────────────────────────────
 
   const {
     data: policies,
@@ -79,6 +274,35 @@ export default function PoliciesPage() {
     queryFn: () => getApi(address).listPolicies(),
     retry: 1,
   })
+
+  // ── Resources query ──────────────────────────────────────────────────────
+
+  const { data: resources } = useQuery<Resource[]>({
+    queryKey: ['resources'],
+    queryFn: () => getApi(address).listResources(),
+    retry: 1,
+  })
+
+  // ── Derived: group policies by resource ─────────────────────────────────
+
+  const policiesByResource = useMemo(() => {
+    const map = new Map<string, AccessPolicy[]>()
+    ;(policies ?? []).forEach((p) => {
+      const list = map.get(p.resourceId) ?? []
+      list.push(p)
+      map.set(p.resourceId, list)
+    })
+    return map
+  }, [policies])
+
+  // ── Derived: orphaned policies (no matching resource) ───────────────────
+
+  const orphanedPolicies = useMemo(() => {
+    const resourceIds = new Set((resources ?? []).map((r) => r.id))
+    return (policies ?? []).filter((p) => !resourceIds.has(p.resourceId))
+  }, [policies, resources])
+
+  // ── Mutation ─────────────────────────────────────────────────────────────
 
   const {
     mutate,
@@ -111,6 +335,8 @@ export default function PoliciesPage() {
         ...current,
         [policy.resourceId]: {},
       }))
+      setEditingResourceId(null)
+      setShowCreateForm(false)
       resetMutation()
     },
 
@@ -140,6 +366,8 @@ export default function PoliciesPage() {
     },
   })
 
+  // ── Save handler ─────────────────────────────────────────────────────────
+
   const savePolicy = (policy: AccessPolicy) => {
     const result = validatePolicy(policy)
 
@@ -164,86 +392,240 @@ export default function PoliciesPage() {
     <FeatureGate enabled={features.adminPolicies} name="Access Policies">
       <AdminGuard>
         <div className="space-y-4">
-          <h1 className="text-2xl font-semibold">Access Policies</h1>
+          {/* Header with New Policy action */}
+          <div className="flex items-center justify-between">
+            <h1 className="text-2xl font-semibold">Access Policies</h1>
+            <Button
+              type="button"
+              size="sm"
+              variant={showCreateForm ? 'secondary' : 'outline'}
+              onClick={() => {
+                setShowCreateForm(!showCreateForm)
+                setEditingResourceId(null)
+              }}
+              aria-expanded={showCreateForm}
+            >
+              {showCreateForm ? 'Close' : '+ New Policy'}
+            </Button>
+          </div>
 
           {sessionExpired && <SessionExpiredBanner />}
 
+          {/* Create new policy form */}
+          {showCreateForm && (
+            <Card>
+              <CardHeader>
+                <CardTitle>Create New Policy</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <PolicyForm
+                  resourceId=""
+                  onSave={savePolicy}
+                  onCancel={() => setShowCreateForm(false)}
+                  disabled={Boolean(pendingPolicyId)}
+                />
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Resources & Policies list */}
           <Card>
             <CardHeader>
-              <CardTitle>Resources</CardTitle>
+              <CardTitle>Resources & Policies</CardTitle>
             </CardHeader>
 
-            <CardContent className="space-y-2">
+            <CardContent className="space-y-3">
               {isLoading ? (
-                <LoadingState message="Loading policies…" />
+                <LoadingState message="Loading resources and policies…" />
               ) : isError ? (
                 <ErrorState
                   title="Failed to load policies"
                   message={safeErrorMessage(error)}
                   onRetry={() => refetch()}
                 />
-              ) : !policies?.length ? (
-                <EmptyState title="No resources configured" message="No access policies have been configured yet." />
+              ) : !policies?.length && !resources?.length ? (
+                <EmptyState
+                  title="No resources configured"
+                  message="No access policies have been configured yet. Create one above to get started."
+                />
               ) : (
-                policies.map((policy) => {
-                  const errors = formErrors[policy.resourceId]
+                <>
+                  {/* Resources with their policies */}
+                  {(resources ?? []).map((resource) => {
+                    const resourcePolicies =
+                      policiesByResource.get(resource.id) ?? []
+                    const isEditing = editingResourceId === resource.id
 
-                  return (
-                    <div key={policy.resourceId} className="space-y-1">
-                      <div className="flex items-center gap-2">
-                        <div className="flex w-40 items-center gap-2 text-sm">
-                          <span>{policy.resourceId}</span>
-                          {pendingPolicyId === policy.resourceId && (
-                            <Badge variant="warning">Saving</Badge>
-                          )}
+                    return (
+                      <div
+                        key={resource.id}
+                        className="space-y-2 rounded-md border p-3"
+                      >
+                        <div className="flex items-start justify-between gap-4">
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="text-sm font-medium">
+                                {resource.title || resource.id}
+                              </span>
+                              {resourcePolicies.length > 0 && (
+                                <Badge variant="default">
+                                  {resourcePolicies.length} policy
+                                  {resourcePolicies.length > 1 ? 's' : ''}
+                                </Badge>
+                              )}
+                            </div>
+                            {resource.description && (
+                              <p className="mt-0.5 text-xs text-muted-foreground truncate">
+                                {resource.description}
+                              </p>
+                            )}
+                          </div>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant={isEditing ? 'secondary' : 'ghost'}
+                            onClick={() => {
+                              setEditingResourceId(
+                                isEditing ? null : resource.id,
+                              )
+                              setShowCreateForm(false)
+                            }}
+                            disabled={Boolean(pendingPolicyId)}
+                            aria-expanded={isEditing}
+                          >
+                            {isEditing ? 'Close' : 'Edit'}
+                          </Button>
                         </div>
 
-                        <select
-                          id={`policy-tier-${policy.resourceId}`}
-                          className="h-9 rounded-md border px-2 text-sm"
-                          value={policy.minTier ?? 'free'}
-                          onChange={(e) =>
-                            savePolicy({
-                              ...policy,
-                              minTier: e.target.value as AccessPolicy['minTier'],
-                            })
-                          }
-                          disabled={Boolean(pendingPolicyId)}
-                        >
-                          <option value="free">free</option>
-                          <option value="standard">standard</option>
-                          <option value="pro">pro</option>
-                        </select>
+                        {/* Existing policies for this resource */}
+                        {resourcePolicies.length > 0 && (
+                          <div className="space-y-2 border-l-2 border-muted pl-3">
+                            {resourcePolicies.map((policy) => {
+                              const errors = formErrors[policy.resourceId]
+                              return (
+                                <div
+                                  key={`${policy.resourceId}-${policy.minTier}-${(policy.roles ?? []).join(',')}`}
+                                  className="space-y-1"
+                                >
+                                  <div className="flex flex-wrap items-center gap-2 text-sm">
+                                    <span className="text-muted-foreground">
+                                      Tier:
+                                    </span>
+                                    <Badge variant="outline">
+                                      {policy.minTier ?? 'free'}
+                                    </Badge>
+                                    {policy.roles &&
+                                      policy.roles.length > 0 && (
+                                        <>
+                                          <span className="text-muted-foreground">
+                                            Roles:
+                                          </span>
+                                          {policy.roles.map((r) => (
+                                            <Badge key={r} variant="default">
+                                              {r}
+                                            </Badge>
+                                          ))}
+                                        </>
+                                      )}
+                                    {pendingPolicyId ===
+                                      policy.resourceId && (
+                                      <Badge variant="warning">Saving</Badge>
+                                    )}
+                                  </div>
 
-                        <Button
-                          type="button"
-                          id={`policy-save-${policy.resourceId}`}
-                          variant="outline"
-                          size="sm"
-                          onClick={() => savePolicy({ ...policy })}
-                          disabled={Boolean(pendingPolicyId)}
-                        >
-                          {pendingPolicyId === policy.resourceId ? 'Saving…' : 'Save'}
-                        </Button>
+                                  {errors &&
+                                    Object.keys(errors).length > 0 && (
+                                      <div
+                                        className="text-xs text-destructive"
+                                        role="alert"
+                                      >
+                                        {Object.values(errors)
+                                          .filter(Boolean)
+                                          .map((msg) => (
+                                            <span key={msg} className="block">
+                                              {msg}
+                                            </span>
+                                      ))}
+                                      </div>
+                                    )}
+                                </div>
+                              )
+                            })}
+                          </div>
+                        )}
+
+                        {/* Inline edit form */}
+                        {isEditing && (
+                          <div className="pt-2">
+                            <PolicyForm
+                              resourceId={resource.id}
+                              initial={resourcePolicies[0]}
+                              onSave={savePolicy}
+                              onCancel={() => setEditingResourceId(null)}
+                              disabled={Boolean(pendingPolicyId)}
+                            />
+                          </div>
+                        )}
                       </div>
+                    )
+                  })}
 
-                      {errors &&
-                        Object.values(errors)
-                          .filter(Boolean)
-                          .map((message) => (
-                            <div
-                              key={message}
-                              className="text-sm text-destructive"
-                              role="alert"
-                            >
-                              {message}
+                  {/* Orphaned policies (no matching resource) */}
+                  {orphanedPolicies.length > 0 && (
+                    <div className="space-y-2 rounded-md border border-dashed p-3">
+                      <p className="text-xs font-medium text-muted-foreground">
+                        Unassigned Policies
+                      </p>
+                      {orphanedPolicies.map((policy) => {
+                        const errors = formErrors[policy.resourceId]
+                        return (
+                          <div
+                            key={policy.resourceId}
+                            className="space-y-1"
+                          >
+                            <div className="flex flex-wrap items-center gap-2 text-sm">
+                              <span className="font-mono text-xs text-muted-foreground">
+                                {policy.resourceId}
+                              </span>
+                              <Badge variant="outline">
+                                {policy.minTier ?? 'free'}
+                              </Badge>
+                              {policy.roles && policy.roles.length > 0 && (
+                                <>
+                                  {policy.roles.map((r) => (
+                                    <Badge key={r} variant="default">
+                                      {r}
+                                    </Badge>
+                                  ))}
+                                </>
+                              )}
+                              {pendingPolicyId === policy.resourceId && (
+                                <Badge variant="warning">Saving</Badge>
+                              )}
                             </div>
-                          ))}
+                            {errors && Object.keys(errors).length > 0 && (
+                              <div
+                                className="text-xs text-destructive"
+                                role="alert"
+                              >
+                                {Object.values(errors)
+                                  .filter(Boolean)
+                                  .map((msg) => (
+                                    <span key={msg} className="block">
+                                      {msg}
+                                    </span>
+                                  ))}
+                              </div>
+                            )}
+                          </div>
+                        )
+                      })}
                     </div>
-                  )
-                })
+                  )}
+                </>
               )}
 
+              {/* Feedback messages */}
               {successMessage && (
                 <div
                   className="text-sm text-green-700 dark:text-green-400"
